@@ -94,7 +94,7 @@ static void *coalesce(void *bp) {
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
     } else {                                    /* Case 4 */
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(FTRP(NEXT_BLKP(bp)));
+        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
         PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
         bp = PREV_BLKP(bp);
@@ -130,9 +130,6 @@ static void *extend_heap(size_t words) {
  */
 int mm_init(void)
 {
-    // 초기 설정을 위해 4워드(=16바이트) 크기의 메모리 공간을 확보해달라고 요청
-    // mem_sbrk 성공 : heap_listp에 16바이트 공간의 시작 주소가 저장된다.
-    // mem_sbrk 실패 : -1을 반환한다. (약속된 에러 값)
     if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *)-1) {
         return -1;
     }
@@ -142,7 +139,6 @@ int mm_init(void)
     PUT(heap_listp + (3*WSIZE), PACK(0, 1));           /* Epilogue header */
     heap_listp += (2*WSIZE);
 
-    /* Extend the empty heap with a free block of CHUNKSIZE bytes */
     if (extend_heap(CHUNKSIZE / WSIZE) == NULL) {
         return -1;
     }
@@ -184,17 +180,6 @@ static void place(void *bp, size_t asize) {
  */
 void *mm_malloc(size_t size)
 {
-    // ----- original code -----
-    // int newsize = ALIGN(size + SIZE_T_SIZE);
-    // void *p = mem_sbrk(newsize);
-    // if (p == (void *)-1)
-    //     return NULL;
-    // else
-    // {
-    //     *(size_t *)p = size;
-    //     return (void *)((char *)p + SIZE_T_SIZE);
-    // }
-
     size_t asize;
     size_t extendsize;
     char *bp;
@@ -245,51 +230,62 @@ void mm_free(void *bp)
  * @param ptr: 크기를 조절할 메모리 블록의 포인터
  * @param size: 재할당할 새로운 크기 (바이트 단위)
  * @return: 재할당된 메모리 블록의 포인터
- * 
- * - ptr이 NULL인 경우: mm_malloc(size)와 동일하게 동작
- * - size가 0인 경우: mm_free(ptr)와 동일하게 동작하고 NULL 반환
- * - 그 외의 경우:
- *   1) 기존 메모리 블록의 크기를 새로운 size로 조절
- *   2) 새 크기가 기존보다 작다면 데이터 일부가 잘릴 수 있음
- *   3) 새 크기가 기존보다 크다면 추가 공간의 초기값은 정의되지 않음
- *   4) 재할당 후 기존 데이터는 새 위치로 복사됨
  */
 void *mm_realloc(void *ptr, size_t size)
 {
+    // 엣지 케이스 1: ptr이 NULL이면 malloc(size)와 동일
     if (ptr == NULL) {
         return mm_malloc(size);
     }
 
+    // 엣지 케이스 2: size가 0이면 free(ptr)와 동일
     if (size == 0) {
         mm_free(ptr);
         return NULL;
     }
 
-    void *oldptr = ptr;           // 이전 집 주소
-    void *newptr;                 // 이사갈 새 집 주소 (아직 없음)
-    size_t old_size, copy_size;   // 옮길 이삿짐 크기
+    size_t old_size = GET_SIZE(HDRP(ptr));
+    size_t asize; // 정렬 및 오버헤드를 포함한 새 블록 크기
 
-    newptr = mm_malloc(size); // 새로 이사갈 집 구하기
-    if (newptr == NULL) {
-        return NULL;          // 새 집을 못 구하면 이사 실패
+    // mm_malloc과 동일한 로직으로 필요한 블록 크기(asize)를 계산 (★★★★★ 핵심 수정 사항)
+    if (size <= DSIZE) {
+        asize = 2 * DSIZE;
+    } else {
+        asize = DSIZE * ((size + DSIZE + (DSIZE - 1)) / DSIZE);
     }
 
-    // 이삿짐 크기 확인하기
-    old_size = GET_SIZE(HDRP(oldptr));
-    copy_size = old_size - DSIZE;       // Payload Size
-
-    // 짐을 얼마나 옮길지 결정하기
-    // 새 집이 더 작으면 짐을 다 못 넣으니까 새 집 크기만큼만 옮기기
-    if (size < copy_size) {
-        copy_size = size;
+    // [최적화 1] 요청한 크기가 기존 블록보다 작거나 같은 경우
+    if (asize <= old_size) {
+        // 남는 공간이 분할할 만큼 크다면 분할
+        if ((old_size - asize) >= (2 * DSIZE)) {
+            PUT(HDRP(ptr), PACK(asize, 1));
+            PUT(FTRP(ptr), PACK(asize, 1));
+            void *remainder_bp = NEXT_BLKP(ptr);
+            PUT(HDRP(remainder_bp), PACK(old_size - asize, 0));
+            PUT(FTRP(remainder_bp), PACK(old_size - asize, 0));
+            coalesce(remainder_bp); // 분할된 가용 블록을 주변과 병합
+        }
+        // 분할할 수 없으면 그냥 기존 블록 그대로 사용
+        return ptr;
     }
+    // [최적화 2] 요청한 크기가 더 큰 경우, 다음 블록을 확인
+    else {
+        void *next_bp = NEXT_BLKP(ptr);
+        size_t next_alloc = GET_ALLOC(HDRP(next_bp));
+        size_t next_size = GET_SIZE(HDRP(next_bp));
+        size_t total_size = old_size + next_size;
 
-    // 실제로 이사하기
-    memcpy(newptr, oldptr, copy_size);
-
-    // 이전 집은 계약 해지하기
-    mm_free(oldptr);
-
-    // 새 집 주소 알려주기
-    return newptr;
+        // 다음 블록이 가용 상태이고, 합친 크기가 충분한 경우
+        if (!next_alloc && total_size >= asize) {
+            PUT(HDRP(ptr), PACK(total_size, 1));
+            PUT(FTRP(ptr), PACK(total_size, 1));
+            return ptr;
+        }
+        // [최후의 수단] 새로 할당받고 데이터 복사
+        void *newptr = mm_malloc(size);
+        if (newptr == NULL) return NULL;
+        memcpy(newptr, ptr, old_size - DSIZE); // 기존 payload 만큼만 복사
+        mm_free(ptr);
+        return newptr;
+    }
 }
