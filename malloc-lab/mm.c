@@ -47,6 +47,7 @@ team_t team = {
 #define DSIZE       8           // 더블 워드 크기    = 8바이트
 #define CHUNKSIZE   (1 << 12)   // mem_sbrk로 힙을 늘릴 용 (4096 = 한 번에 4KB씩)
 
+#define PROLOGUE_BLOCK_SIZE DSIZE      // 프롤로그 블록 크기 (8바이트)
 #define MINIMUM_BLOCK_SIZE (2 * DSIZE) // 최소 블록 크기 (16바이트)
 
 #define ALLOCATED 1 // 할당된 상태
@@ -107,43 +108,65 @@ static void *coalesce(void *bp) {
     return bp;
 }
 
+
 /*
- * extend_heap : 새 가용 블록으로 힙 확장하기
+ * extend_heap - 힙을 확장하여 새로운 가용 블록을 생성하는 함수
+ * 
+ * @param words: 확장할 크기 (워드 단위)
+ * @return:      새로 생성된 가용 블록의 포인터, 실패 시 NULL
+ * 
+ * 동작 방식:
+ * 1. 더블 워드 정렬 요구사항을 만족하도록 크기를 조정
+ * 2. mem_sbrk를 호출하여 힙을 확장
+ * 3. 새 공간을 가용 블록으로 초기화 (헤더, 푸터 설정)
+ * 4. 새 에필로그 블록을 배치
+ * 5. 이전 블록과의 통합 가능성 확인
  */
 static void *extend_heap(size_t words) {
     char *bp;
     size_t size;
 
-    /* Allocate an even number of words to maintain alignment */
-    size = (words % 2) ? (words + 1) * WSIZE : words * WSIZE;
+    // 8바이트 정렬을 위해, 요청된 워드 개수를 짝수로 맞춰준다.
+    size_t num_words = words;
+    if (num_words % 2 != 0) {
+        num_words++;
+    }
+    size = num_words * WSIZE;
+
+    // OS로부터 size만큼의 메모리를 추가로 받아오기
     if ((long)(bp = mem_sbrk(size)) == -1) {
         return NULL;
     }
 
-    /* Initialize a free block header / footer and the epilogue header */
-    PUT(HDRP(bp), PACK(size, FREE));           /* Free block header */
-    PUT(FTRP(bp), PACK(size, FREE));           /* Free block footer */
-    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, ALLOCATED));   /* New epilogue header */
+    // 새로 받은 공간을 하나의 큰 가용 블록으로 만들기
+    PUT(HDRP(bp), PACK(size, FREE));                /* 가용 블록의 헤더 */
+    PUT(FTRP(bp), PACK(size, FREE));                /* 가용 블록의 푸터 */
+    PUT(HDRP(NEXT_BLKP(bp)), PACK(0, ALLOCATED));   /* 새 에필로그 헤더 설치 */
 
     /* Coalesce if the previous block was free */
     return coalesce(bp);
 }
 
 
+
 /*
- * mm_init - initialize the malloc package.
+ * mm_init - 메모리 시스템을 초기화한다.
+ *           초기 힙 영역을 생성하고 프롤로그와 에필로그 블록을 설정한다.
+ * 
+ * 반환값: 성공하면 0, 실패하면 -1
  */
-int mm_init(void)
-{
-    if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *)-1) {
+int mm_init(void) {
+    // 초기 힙 공간 4워드(16바이트)를 OS로부터 할당받는다.
+    if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *) -1) {
         return -1;
     }
-    PUT(heap_listp, 0);                                        /* Alignment padding */
-    PUT(heap_listp + (1 * WSIZE), PACK(DSIZE, ALLOCATED));       /* Prologue header */
-    PUT(heap_listp + (2 * WSIZE), PACK(DSIZE, ALLOCATED));       /* Prologue footer */
-    PUT(HDRP(NEXT_BLKP(heap_listp)), PACK(0, ALLOCATED));      /* Epilogue header */
-    heap_listp += (2 * WSIZE);
+    PUT(heap_listp, 0);                                                   /* 정렬을 위한 패딩 워드 */
+    PUT(heap_listp + (1 * WSIZE), PACK(PROLOGUE_BLOCK_SIZE, ALLOCATED));  /* 프롤로그 블록의 헤더 */
+    PUT(heap_listp + (2 * WSIZE), PACK(PROLOGUE_BLOCK_SIZE, ALLOCATED));  /* 프롤로그 블록의 푸터 */
+    PUT(HDRP(NEXT_BLKP(heap_listp)), PACK(0, ALLOCATED));                 /* 에필로그 블록의 헤더 */
+    heap_listp += (2 * WSIZE);                                            /* 프롤로그 블록의 payload를 가리키도록 포인터 이동 */
 
+    // CHUNKSIZE만큼 힙을 확장하여 초기 가용 블록을 생성한다.
     if (extend_heap(CHUNKSIZE / WSIZE) == NULL) {
         return -1;
     }
@@ -152,8 +175,19 @@ int mm_init(void)
 }
 
 
+
+/*
+ * find_fit - 요청된 크기를 수용할 수 있는 가용 블록을 찾는 함수
+ * 
+ * @param required_size: 할당하고자 하는 메모리 크기 (헤더와 푸터 포함)
+ * @return:              적합한 가용 블록의 포인터, 없으면 NULL
+ * 
+ * First-fit 방식을 사용:
+ * 1. 힙의 처음부터 순차적으로 블록들을 검색
+ * 2. 가용 상태이고 요청 크기보다 큰 첫 번째 블록을 찾으면 반환
+ * 3. 적합한 블록을 찾지 못하면 NULL 반환
+ */
 static void *find_fit(size_t required_size) {
-    /* First-Fit search */
     void *bp;
 
     for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
@@ -161,9 +195,22 @@ static void *find_fit(size_t required_size) {
             return bp;
         }
     }
-    return NULL; /* No fit */
+    return NULL;
 }
 
+
+/*
+ * place - 가용 블록에 요청된 크기의 메모리를 할당하는 함수
+ * 
+ * @param bp:            할당할 가용 블록의 포인터
+ * @param required_size: 할당하고자 하는 메모리 크기 (헤더와 푸터 포함)
+ * 
+ * 동작 방식:
+ * 1. 가용 블록의 크기가 요청 크기보다 충분히 크면 (최소 블록 크기 이상 차이)
+ *    - 블록을 분할하여 앞부분은 할당하고 뒷부분은 가용 블록으로 분리
+ * 2. 가용 블록의 크기가 요청 크기와 비슷하면
+ *    - 블록 전체를 할당 상태로 변경
+ */
 static void place(void *bp, size_t required_size) {
     size_t free_size = GET_SIZE(HDRP(bp));
     size_t remainder_size = free_size - required_size;
@@ -174,45 +221,53 @@ static void place(void *bp, size_t required_size) {
         PUT(FTRP(bp), PACK(required_size, ALLOCATED)); // 푸터에도 기록
 
         // 남는 부분을 새로운 가용 블록으로 만들기
-        bp = NEXT_BLKP(bp); // 남는 공간의 시작점으로 이동
+        bp = NEXT_BLKP(bp);                           // 남는 공간의 시작점으로 이동
         PUT(HDRP(bp), PACK(remainder_size, FREE));    // 남는 공간의 헤더 설정
         PUT(FTRP(bp), PACK(remainder_size, FREE));    // 남는 공간의 푸터 설정
-        coalesce(bp); // 새로 생긴 가용 블록을 인접 블록과 병합
+        coalesce(bp);                                 // 새로 생긴 가용 블록을 인접 블록과 병합
     } else {
         PUT(HDRP(bp), PACK(free_size, ALLOCATED));    // 헤더에 원래 크기, 할당됨 상태 기록
         PUT(FTRP(bp), PACK(free_size, ALLOCATED));    // 푸터에도 동일하게 기록
     }
 }
 
+
 /*
- * mm_malloc - Allocate a block by incrementing the brk pointer.
- * Always allocate a block whose size is a multiple of the alignment.
+ * mm_malloc - 요청된 크기의 메모리를 할당하는 함수
+ * 
+ * @param size: 할당하고자 하는 메모리의 크기 (바이트 단위)
+ * @return:     할당된 메모리 블록의 포인터, 실패 시 NULL
+ * 
+ * 동작 방식:
+ * 1. 요청 크기가 0이면 NULL 반환
+ * 2. 실제 필요한 블록 크기 계산 (헤더/푸터, 정렬 요구사항 포함)
+ * 3. 가용 리스트에서 적합한 블록 검색
+ * 4. 적합한 블록이 없으면 힙을 확장하여 새 블록 할당
  */
-void *mm_malloc(size_t size)
-{
-    size_t required_size;      // 실제 할당할 블록의 크기 (헤더/푸터, 정렬 포함)
-    size_t extension_size;     // 적합한 블록이 없을 때 힙을 확장할 크기
+void *mm_malloc(size_t size) {
+    size_t required_size;       // 실제 할당할 블록의 크기 (헤더/푸터, 정렬 포함)
+    size_t extension_size;      // 적합한 블록이 없을 때 힙을 확장할 크기
     char *bp;
 
-    /* Ignore spurious requests */
+    /* 크기가 0인 요청은 무시 */
     if (size == 0) {
         return NULL;
     }
 
-    /* Adjust block size to include overhead and alignment reqs */
+    /* 오버헤드와 정렬 요구사항을 포함한 블록 크기 조정 */
     if (size <= DSIZE) {
         required_size = MINIMUM_BLOCK_SIZE;
     } else {
         required_size = DSIZE * ((size + (DSIZE) + (DSIZE - 1)) / DSIZE);
     }
 
-    /* Search the free list for a fit */
+    /* 가용 리스트에서 적합한 블록 검색 */
     if ((bp = find_fit(required_size)) != NULL) {
         place(bp, required_size);
         return bp;
     }
 
-    /* No fit found. Get more memory and place the block */
+    /* 적합한 블록을 찾지 못했으므로, 힙을 확장하고 블록 배치 */
     extension_size = MAX(required_size, CHUNKSIZE);
     if ((bp = extend_heap(extension_size / WSIZE)) == NULL) {
         return NULL;
@@ -221,8 +276,16 @@ void *mm_malloc(size_t size)
     return bp;
 }
 
+
 /*
- * mm_free - Freeing a block does nothing.
+ * mm_free - 할당된 메모리 블록을 해제하는 함수
+ * 
+ * @param bp: 해제할 메모리 블록의 포인터
+ * 
+ * 동작 방식:
+ * 1. 해제할 블록의 크기 정보를 헤더에서 읽어옴
+ * 2. 블록의 헤더와 푸터를 가용 상태로 변경
+ * 3. 인접한 가용 블록들과 병합 (coalesce 함수 호출)
  */
 void mm_free(void *bp)
 {
