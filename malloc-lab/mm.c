@@ -84,7 +84,20 @@ static char *heap_listp;
 static char *free_listp;
 
 /*
- * coalesce :
+ * coalesce - 현재 블록을 인접한 가용 블록들과 병합하는 함수
+ *
+ * @param bp: 병합을 시도할 현재 블록의 포인터
+ * @return:   병합된 블록의 포인터
+ *
+ * 네 가지 경우의 수:
+ * Case 1) 이전 블록, 다음 블록 모두 할당 상태
+ *         -> 병합없이 현재 블록 반환
+ * Case 2) 이전 블록은 할당 상태, 다음 블록은 가용 상태
+ *         -> 현재 블록과 다음 블록을 병합
+ * Case 3) 이전 블록은 가용 상태, 다음 블록은 할당 상태
+ *         -> 이전 블록과 현재 블록을 병합
+ * Case 4) 이전 블록, 다음 블록 모두 가용 상태
+ *         -> 이전 블록, 현재 블록, 다음 블록 모두 병합
  */
 static void *coalesce(void *bp) {
     size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
@@ -94,14 +107,107 @@ static void *coalesce(void *bp) {
     if (prev_alloc == ALLOCATED && next_alloc == ALLOCATED) {       /* Case 1 */
         return bp;
     } else if (prev_alloc == ALLOCATED && next_alloc == FREE) {     /* Case 2 */
-        size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
+        // 병합할 bp의 다음 가용 블록: victim
+        void *victim_block = NEXT_BLKP(bp);                     // '다음 블록'의 포인터를 얻기
+
+        // 가용 리스트에 있는 victim의 이전 블록(pred)과 다음 블록(succ)
+        void *victim_pred = (void *)GET(victim_block);
+        void *victim_succ = (void *)GET(victim_block + WSIZE);
+
+        // edge case 1: victim이 가용 리스트의 맨 앞 블록인 경우
+        if (victim_pred == NULL && victim_succ != NULL) {
+            free_listp = victim_succ;
+            PUT(victim_succ, 0);              // victim 다음 블럭의 PRED를 NULL로 설정한다.
+        }
+        // edge case 2: victim이 가용 리스트의 맨 뒤 블록인 경우
+        else if (victim_pred != NULL && victim_succ == NULL) {
+            PUT(victim_pred + WSIZE, 0);      // victim 이전 블럭의 SUCC을 NULL로 설정한다.
+        }
+
+        // edge case 3: victim이 가용 리스트의 유일한 블록일 경우??
+        // -> 기존 블록 bp가 이미 있는데 victim이 가용 리스트의 유일한 블록일 경우가 없다.
+        // ... 라고 생각했는데, bp는 아직 가용 리스트에 없는 '새로운' 가용 블록이다.
+        // 이 시점에 가용 리스트 전체에 victim 만 있을 수도 있다.
+        else if (victim_pred == NULL && victim_succ == NULL) {
+            // 병합하기 전 victim이 가리키던 PRED, SUCC을 초기화한다.
+            PUT(victim_block, 0);           // victim의 PRED 를 NULL로 설정
+            PUT(victim_block + WSIZE, 0);   // victim의 SUCC 을 NULL로 설정
+            free_listp = 0;                 // 가용 리스트의 시작 주소를 초기화한다.
+        }
+        else {
+            // victim의 이전 블록의 PRED는 그대로 두고, SUCC을 victim_next로 가리키게 한다.
+            // victim의 다음 블록의 NEXT는 그대로 두고, PRED를 victim_prev로 가리키게 한다.
+            PUT(victim_pred + WSIZE, victim_succ);
+            PUT(victim_succ, victim_pred);
+        }
+
+        // victim의 이전/다음 블록이 서로 연결되었으니, 이제 병합한다.
+        size += GET_SIZE(HDRP(victim_block));
         PUT(HDRP(bp), PACK(size, FREE));
         PUT(FTRP(bp), PACK(size, FREE));
+
+        // 병합한 블록 bp를 가용 리스트의 맨 앞에 추가한다.
+        PUT(bp, 0);                   // 새 가용 블록의 PRED -> NULL이다. (가용 리스트의 첫 번째 블록이니까.)
+        PUT(bp + WSIZE, free_listp);  // 새 가용 블록의 SUCC -> 기존 가용 리스트의 첫 번째 블록을 가리키던 free_listp이다.
+
+        // 기존 가용 블록의 첫 번째 블록은 free_listp가 가리키고 있다.
+        // edge case: 만약 가용 리스트가 비어 있는 상태였다면?
+        // 근데 이 경우에는 victim이 있는 상태여서 가용 리스트가 비어있는 상태가 있을 수 없지 않나?
+        // -> 근데 victim 이 bp에 병합되어서 사라지잖아...
+        if (free_listp != NULL) {
+            PUT(free_listp, bp);     // Old Head의 PRED는 새 가용 블록을 가리키게 한다.
+        }
+        free_listp = bp;             // 가용 리스트의 새로운 HEAD를 bp로 설정하기
+
     } else if (prev_alloc == FREE && next_alloc == ALLOCATED) {     /* Case 3 */
+        // 현재 블록(bp)과 'bp의 이전 블록'을 병합하는 경우
+        void *victim_block = PREV_BLKP(bp);
+
+        // 가용 리스트에 있는 victim의 이전 블록(pred)과 다음 블록(succ)
+        void *victim_pred = (void *)GET(victim_block);
+        void *victim_succ = (void *)GET(victim_block + WSIZE);
+
+        // victim이 가용 리스트의 맨 앞 블록인 경우
+        if (victim_pred == NULL && victim_succ != NULL) {
+            free_listp = victim_succ;
+            PUT(victim_succ, 0);              // victim 다음 블럭의 PRED를 NULL로 설정한다.
+        }
+        // victim이 가용 리스트의 맨 뒤 블록인 경우
+        else if (victim_pred != NULL && victim_succ == NULL) {
+            PUT(victim_pred + WSIZE, 0);      // victim 이전 블럭의 SUCC을 NULL로 설정한다.
+
+        }
+        // victim이 가용 리스트의 유일한 블록인 경우
+        else if (victim_pred == NULL && victim_succ == NULL) {
+            // 병합하기 전 victim이 가리키던 PRED, SUCC을 초기화한다.
+            PUT(victim_block, 0);           // victim의 PRED 를 NULL로 설정
+            PUT(victim_block + WSIZE, 0);   // victim의 SUCC 을 NULL로 설정
+            free_listp = 0;                 // 가용 리스트의 시작 주소를 초기화한다.
+        } else {
+            // victim의 이전 블록의 PRED는 그대로 두고, SUCC을 victim_next로 가리키게 한다.
+            // victim의 다음 블록의 NEXT는 그대로 두고, PRED를 victim_prev로 가리키게 한다.
+            PUT(victim_pred + WSIZE, victim_succ);
+            PUT(victim_succ, victim_pred);
+        }
+
+
         size += GET_SIZE(HDRP(PREV_BLKP(bp)));
         PUT(FTRP(bp), PACK(size, FREE));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, FREE));
-        bp = PREV_BLKP(bp);
+
+        // 병합한 블록을 가용 리스트의 맨 앞에 추가한다.
+        PUT(PREV_BLKP(bp), 0);
+        PUT(PREV_BLKP(bp) + WSIZE, free_listp);
+
+        // 기존 가용 블록의 첫 번째 블록은 free_listp가 가리키고 있다.
+        // edge case: 만약 가용 리스트가 비어 있는 상태였다면?
+        if (free_listp != NULL) {
+            PUT(free_listp, PREV_BLKP(bp));     // Old Head의 PRED는 새 가용 블록을 가리키게 한다.
+        }
+
+        // free_listp 업데이트: bp는 PREV_BLKP(bp)에 병합되는 형태이다.
+        free_listp = PREV_BLKP(bp);
+
     } else {                                                        /* Case 4 */
         size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
         PUT(HDRP(PREV_BLKP(bp)), PACK(size, FREE));
@@ -114,10 +220,10 @@ static void *coalesce(void *bp) {
 
 /*
  * extend_heap - 힙을 확장하여 새로운 가용 블록을 생성하는 함수
- * 
+ *
  * @param words: 확장할 크기 (워드 단위)
  * @return:      새로 생성된 가용 블록의 포인터, 실패 시 NULL
- * 
+ *
  * 동작 방식:
  * 1. 더블 워드 정렬 요구사항을 만족하도록 크기를 조정
  * 2. mem_sbrk를 호출하여 힙을 확장
@@ -155,7 +261,7 @@ static void *extend_heap(size_t words) {
 /*
  * mm_init - 메모리 시스템을 초기화한다.
  *           초기 힙 영역을 생성하고 프롤로그와 에필로그 블록을 설정한다.
- * 
+ *
  * 반환값: 성공하면 0, 실패하면 -1
  */
 int mm_init(void) {
@@ -181,10 +287,10 @@ int mm_init(void) {
 
 /*
  * find_fit - 요청된 크기를 수용할 수 있는 가용 블록을 찾는 함수
- * 
+ *
  * @param required_size: 할당하고자 하는 메모리 크기 (헤더와 푸터 포함)
  * @return:              적합한 가용 블록의 포인터, 없으면 NULL
- * 
+ *
  * First-fit 방식을 사용:
  * 1. 힙의 처음부터 순차적으로 블록들을 검색
  * 2. 가용 상태이고 요청 크기보다 큰 첫 번째 블록을 찾으면 반환
@@ -204,10 +310,10 @@ static void *find_fit(size_t required_size) {
 
 /*
  * place - 가용 블록에 요청된 크기의 메모리를 할당하는 함수
- * 
+ *
  * @param bp:            할당할 가용 블록의 포인터
  * @param required_size: 할당하고자 하는 메모리 크기 (헤더와 푸터 포함)
- * 
+ *
  * 동작 방식:
  * 1. 가용 블록의 크기가 요청 크기보다 충분히 크면 (최소 블록 크기 이상 차이)
  *    - 블록을 분할하여 앞부분은 할당하고 뒷부분은 가용 블록으로 분리
@@ -273,10 +379,10 @@ static void place(void *bp, size_t required_size) {
 
 /*
  * mm_malloc - 요청된 크기의 메모리를 할당하는 함수
- * 
+ *
  * @param size: 할당하고자 하는 메모리의 크기 (바이트 단위)
  * @return:     할당된 메모리 블록의 포인터, 실패 시 NULL
- * 
+ *
  * 동작 방식:
  * 1. 요청 크기가 0이면 NULL 반환
  * 2. 실제 필요한 블록 크기 계산 (헤더/푸터, 정렬 요구사항 포함)
@@ -318,9 +424,9 @@ void *mm_malloc(size_t size) {
 
 /*
  * mm_free - 할당된 메모리 블록을 해제하는 함수
- * 
+ *
  * @param bp: 해제할 메모리 블록의 포인터
- * 
+ *
  * 동작 방식:
  * 1. 해제할 블록의 크기 정보를 헤더에서 읽어옴
  * 2. 블록의 헤더와 푸터를 가용 상태로 변경
@@ -338,7 +444,7 @@ void mm_free(void *bp)
 
 /*
  * mm_realloc - 메모리 블록의 크기를 재조정하는 함수
- * 
+ *
  * @param ptr: 크기를 조절할 메모리 블록의 포인터
  * @param size: 재할당할 새로운 크기 (바이트 단위)
  * @return: 재할당된 메모리 블록의 포인터
