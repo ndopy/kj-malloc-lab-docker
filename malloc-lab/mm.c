@@ -80,6 +80,9 @@ team_t team = {
 /* Global variables */
 static char *heap_listp;
 
+// 가용 리스트의 시작점을 가리키는 포인터
+static char *free_listp;
+
 /*
  * coalesce :
  */
@@ -215,6 +218,30 @@ static void place(void *bp, size_t required_size) {
     size_t free_size = GET_SIZE(HDRP(bp));
     size_t remainder_size = free_size - required_size;
 
+    void *prev_free_bp = (void *)GET(bp);           // 이전 가용 블록의 주소 읽기
+    void *next_free_bp = (void *)GET(bp + WSIZE);   // 다음 가용 블록의 주소 읽기
+
+    // edge case 1: 제거된 블록이 가용 리스트의 첫 번째 블록이었다면?
+    if (prev_free_bp == NULL && next_free_bp != NULL) {
+        free_listp = next_free_bp;
+
+        // 두 번째 블록의 PRED 를 NULL로 해야 한다.
+        PUT(next_free_bp, 0);
+    }
+    // edge case 2: 제거된 블록이 가용 리스트의 가장 마지막 블록이었다면?
+    else if (prev_free_bp != NULL && next_free_bp == NULL) {
+        // 삭제 블록의 '이전 블록'의(=끝에서 두 번째 블록) SUCC을 NULL로 해야 한다.
+        PUT(prev_free_bp + WSIZE, 0);
+    }
+    // edge case 3: 제거된 블록이 가용 리스트의 유일한 블록이었다면?
+    else if (prev_free_bp == NULL && next_free_bp == NULL) {
+        free_listp = 0;   // 가용 리스트의 시작 주소를 초기화한다.
+    }
+    else {
+        PUT(prev_free_bp + WSIZE, next_free_bp);  // 앞 블록의 SUCC가 '뒷 블록'을 가리키도록 수정
+        PUT(next_free_bp, prev_free_bp);          // 뒷 블록의 PRED가 '앞 블록'을 가리키도록 수정
+    }
+
     if (remainder_size >= MINIMUM_BLOCK_SIZE) {  // 남는 공간이 분할할 만큼 크다면 분할
         // 먼저 요청한만큼 메모리 할당하기
         PUT(HDRP(bp), PACK(required_size, ALLOCATED)); // 헤더에 크기, 할당됨(1) 기록
@@ -225,6 +252,18 @@ static void place(void *bp, size_t required_size) {
         PUT(HDRP(bp), PACK(remainder_size, FREE));    // 남는 공간의 헤더 설정
         PUT(FTRP(bp), PACK(remainder_size, FREE));    // 남는 공간의 푸터 설정
         coalesce(bp);                                 // 새로 생긴 가용 블록을 인접 블록과 병합
+
+        // 새로운 가용 블록이 가용 리스트의 가장 첫 번째 블록이 되어야 한다.
+        PUT(bp, 0);                   // 새 가용 블록의 PRED -> NULL이다. (가용 리스트의 첫 번째 블록이니까.)
+        PUT(bp + WSIZE, free_listp);  // 새 가용 블록의 SUCC -> 기존 가용 리스트의 첫 번째 블록을 가리키던 free_listp이다.
+
+        // 기존 가용 블록의 첫 번째 블록은 free_listp가 가리키고 있다.
+        // edge case: 만약 가용 리스트가 비어 있는 상태였다면?
+        if (free_listp != NULL) {
+            PUT(free_listp, bp);     // Old Head의 PRED는 새 가용 블록을 가리키게 한다.
+        }
+        free_listp = bp;             // 가용 리스트의 새로운 HEAD를 bp로 설정하기
+
     } else {
         PUT(HDRP(bp), PACK(free_size, ALLOCATED));    // 헤더에 원래 크기, 할당됨 상태 기록
         PUT(FTRP(bp), PACK(free_size, ALLOCATED));    // 푸터에도 동일하게 기록
