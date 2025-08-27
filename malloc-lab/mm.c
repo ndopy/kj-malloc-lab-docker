@@ -160,48 +160,41 @@ static void *coalesce(void *bp) {
     size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
     size_t size = GET_SIZE(HDRP(bp));
 
-    if (prev_alloc == ALLOCATED && next_alloc == ALLOCATED) {       /* Case 1 */
-        add_to_freelist(bp);
-    } else if (prev_alloc == ALLOCATED && next_alloc == FREE) {     /* Case 2 */
+    // Case 1: 이전, 다음 블록 모두 할당된 상태.
+    // -> 아무것도 병합하지 않음. bp와 size는 그대로 유지.
+
+    // Case 2: 이전 블록 할당, 다음 블록 가용 상태.
+    if (prev_alloc && !next_alloc) {
         void *next_bp = NEXT_BLKP(bp);
-        remove_from_freelist(next_bp);
-
-        // 물리적으로 병합
-        size += GET_SIZE(HDRP(next_bp));
-        PUT(HDRP(bp), PACK(size, FREE));
-        PUT(FTRP(bp), PACK(size, FREE));
-
-        // 병합된 새 블록을 가용 리스트에 추가
-        add_to_freelist(bp);
-
-    } else if (prev_alloc == FREE && next_alloc == ALLOCATED) {     /* Case 3 */
-        void *prev_bp = PREV_BLKP(bp);
-        remove_from_freelist(prev_bp);
-
-        // 물리적으로 병합
-        size += GET_SIZE(HDRP(prev_bp));
-        PUT(FTRP(bp), PACK(size, FREE));
-        PUT(HDRP(prev_bp), PACK(size, FREE));
-        bp = prev_bp;
-
-        // 병합된 새 블록을 가용 리스트에 추가
-        add_to_freelist(bp);
-
-    } else {                                                        /* Case 4 */
-        void *prev_bp = PREV_BLKP(bp);
-        void *next_bp = NEXT_BLKP(bp);
-        remove_from_freelist(prev_bp);  // 이전 블록 제거
-        remove_from_freelist(next_bp);  // 다음 블록 제거
-
-        // 물리적으로 병합
-        size += GET_SIZE(HDRP(prev_bp)) + GET_SIZE(HDRP(next_bp));
-        PUT(HDRP(prev_bp), PACK(size, FREE));
-        PUT(FTRP(next_bp), PACK(size, FREE));
-        bp = prev_bp;
-
-        // 병합된 새 블록을 가용 리스트에 추가
-        add_to_freelist(bp);
+        remove_from_freelist(next_bp);       // 다음 블록을 가용 리스트에서 제거
+        size += GET_SIZE(HDRP(next_bp));     // 다음 블록 크기를 현재 블록에 더함
+        // bp 포인터는 그대로 유지
     }
+    // Case 3: 이전 블록 가용, 다음 블록 할당 상태.
+    else if (!prev_alloc && next_alloc) {
+        void *prev_bp = PREV_BLKP(bp);
+        remove_from_freelist(prev_bp);       // 이전 블록을 가용 리스트에서 제거
+        size += GET_SIZE(HDRP(prev_bp));     // 이전 블록 크기를 현재 블록에 더함
+        bp = prev_bp;                        // bp 포인터를 이전 블록의 시작점으로 변경
+    }
+    // Case 4: 이전, 다음 블록 모두 가용 상태.
+    else if (!prev_alloc && !next_alloc) {
+        void *prev_bp = PREV_BLKP(bp);
+        void *next_bp = NEXT_BLKP(bp);
+        remove_from_freelist(prev_bp);       // 이전 블록 제거
+        remove_from_freelist(next_bp);       // 다음 블록 제거
+        size += GET_SIZE(HDRP(prev_bp)) + GET_SIZE(HDRP(next_bp)); // 두 블록 크기를 모두 더함
+        bp = prev_bp;                        // bp 포인터를 이전 블록의 시작점으로 변경
+    }
+
+    // 모든 병합 처리가 끝난 후, 최종 bp와 size를 가지고
+    // 헤더와 푸터를 딱 한 번만 업데이트한다.
+    PUT(HDRP(bp), PACK(size, FREE));
+    PUT(FTRP(bp), PACK(size, FREE));
+
+    // 마지막으로, 최종적으로 만들어진 가용 블록을 가용 리스트의 맨 앞에 추가한다.
+    add_to_freelist(bp);
+
     return bp;
 }
 
