@@ -243,10 +243,14 @@ static void *extend_heap(size_t words) {
  * 반환값: 성공하면 0, 실패하면 -1
  */
 int mm_init(void) {
+    // 가용 리스트의 시작점 초기화
+    free_listp = 0;
+
     // 초기 힙 공간 4워드(16바이트)를 OS로부터 할당받는다.
     if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *) -1) {
         return -1;
     }
+
     PUT(heap_listp, 0);                                                   /* 정렬을 위한 패딩 워드 */
     PUT(heap_listp + (1 * WSIZE), PACK(PROLOGUE_BLOCK_SIZE, ALLOCATED));  /* 프롤로그 블록의 헤더 */
     PUT(heap_listp + (2 * WSIZE), PACK(PROLOGUE_BLOCK_SIZE, ALLOCATED));  /* 프롤로그 블록의 푸터 */
@@ -277,7 +281,7 @@ int mm_init(void) {
 static void *find_fit(size_t required_size) {
     void *bp;
 
-    for (bp = heap_listp; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
+    for (bp = free_listp; bp != NULL; bp = (void *)GET(bp + WSIZE)) {
         if (!GET_ALLOC(HDRP(bp)) && (required_size <= GET_SIZE(HDRP(bp)))) {
             return bp;
         }
