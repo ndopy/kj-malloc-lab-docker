@@ -83,6 +83,50 @@ static char *heap_listp;
 // 가용 리스트의 시작점을 가리키는 포인터
 static char *free_listp;
 
+/* 가용 리스트 관리를 위한 헬퍼 함수 */
+
+/**
+ * 가용 리스트의 맨 앞에 새로운 블록 bp를 추가 (LIFO 방식)
+ * @param bp
+ */
+static void add_to_freelist(void *bp) {
+    // 새 블록의 SUCC는 기존의 첫 번째 블록(free_listp)을 가리켜야 한다.
+    PUT(bp + WSIZE, free_listp);
+
+    // 기존 가용 리스트가 비어있지 않았다면,
+    // 기존 첫 번째 블록의 PRED 가 새 블록을 가리켜야 한다.
+    if (free_listp != NULL) {
+        PUT(free_listp, (unsigned int) bp);
+    }
+
+    PUT(bp, 0);         // 새 블록의 PRED는 NULL
+    free_listp = bp;    // 가용 리스트의 시작 블록은 이제 새 블록
+}
+
+/**
+ * 가용 리스트에서 bp 블록을 제거
+ * @param bp
+ */
+static void remove_from_freelist(void *bp) {
+    // 제거하려는 블록의 이전/다음 블록 확인하기
+    void *prev_free = (void *)GET(bp);
+    void *next_free = (void *)GET(bp + WSIZE);
+
+    if (prev_free) {
+        PUT(prev_free + WSIZE, (unsigned int) next_free);
+    } else {                        // 제거하려는 블록이 리스트의 첫 번째 블록인 경우
+        free_listp = next_free;     // 리스트의 시작은 삭제할 블록의 다음 블록
+    }
+
+    // 다음 블록의 PRED를 제거하려는 블록의 이전 블록으로 설정
+    if (next_free) {
+        PUT(next_free, (unsigned int) prev_free);
+    }
+}
+
+
+
+
 /*
  * coalesce - 현재 블록을 인접한 가용 블록들과 병합하는 함수
  *
@@ -105,114 +149,46 @@ static void *coalesce(void *bp) {
     size_t size = GET_SIZE(HDRP(bp));
 
     if (prev_alloc == ALLOCATED && next_alloc == ALLOCATED) {       /* Case 1 */
-        return bp;
+        add_to_freelist(bp);
     } else if (prev_alloc == ALLOCATED && next_alloc == FREE) {     /* Case 2 */
-        // 병합할 bp의 다음 가용 블록: victim
-        void *victim_block = NEXT_BLKP(bp);                     // '다음 블록'의 포인터를 얻기
+        void *next_bp = NEXT_BLKP(bp);
+        remove_from_freelist(next_bp);
 
-        // 가용 리스트에 있는 victim의 이전 블록(pred)과 다음 블록(succ)
-        void *victim_pred = (void *)GET(victim_block);
-        void *victim_succ = (void *)GET(victim_block + WSIZE);
-
-        // edge case 1: victim이 가용 리스트의 맨 앞 블록인 경우
-        if (victim_pred == NULL && victim_succ != NULL) {
-            free_listp = victim_succ;
-            PUT(victim_succ, 0);              // victim 다음 블럭의 PRED를 NULL로 설정한다.
-        }
-        // edge case 2: victim이 가용 리스트의 맨 뒤 블록인 경우
-        else if (victim_pred != NULL && victim_succ == NULL) {
-            PUT(victim_pred + WSIZE, 0);      // victim 이전 블럭의 SUCC을 NULL로 설정한다.
-        }
-
-        // edge case 3: victim이 가용 리스트의 유일한 블록일 경우??
-        // -> 기존 블록 bp가 이미 있는데 victim이 가용 리스트의 유일한 블록일 경우가 없다.
-        // ... 라고 생각했는데, bp는 아직 가용 리스트에 없는 '새로운' 가용 블록이다.
-        // 이 시점에 가용 리스트 전체에 victim 만 있을 수도 있다.
-        else if (victim_pred == NULL && victim_succ == NULL) {
-            // 병합하기 전 victim이 가리키던 PRED, SUCC을 초기화한다.
-            PUT(victim_block, 0);           // victim의 PRED 를 NULL로 설정
-            PUT(victim_block + WSIZE, 0);   // victim의 SUCC 을 NULL로 설정
-            free_listp = 0;                 // 가용 리스트의 시작 주소를 초기화한다.
-        }
-        else {
-            // victim의 이전 블록의 PRED는 그대로 두고, SUCC을 victim_next로 가리키게 한다.
-            // victim의 다음 블록의 NEXT는 그대로 두고, PRED를 victim_prev로 가리키게 한다.
-            PUT(victim_pred + WSIZE, victim_succ);
-            PUT(victim_succ, victim_pred);
-        }
-
-        // victim의 이전/다음 블록이 서로 연결되었으니, 이제 병합한다.
-        size += GET_SIZE(HDRP(victim_block));
+        // 물리적으로 병합
+        size += GET_SIZE(HDRP(next_bp));
         PUT(HDRP(bp), PACK(size, FREE));
         PUT(FTRP(bp), PACK(size, FREE));
 
-        // 병합한 블록 bp를 가용 리스트의 맨 앞에 추가한다.
-        PUT(bp, 0);                   // 새 가용 블록의 PRED -> NULL이다. (가용 리스트의 첫 번째 블록이니까.)
-        PUT(bp + WSIZE, free_listp);  // 새 가용 블록의 SUCC -> 기존 가용 리스트의 첫 번째 블록을 가리키던 free_listp이다.
-
-        // 기존 가용 블록의 첫 번째 블록은 free_listp가 가리키고 있다.
-        // edge case: 만약 가용 리스트가 비어 있는 상태였다면?
-        // 근데 이 경우에는 victim이 있는 상태여서 가용 리스트가 비어있는 상태가 있을 수 없지 않나?
-        // -> 근데 victim 이 bp에 병합되어서 사라지잖아...
-        if (free_listp != NULL) {
-            PUT(free_listp, bp);     // Old Head의 PRED는 새 가용 블록을 가리키게 한다.
-        }
-        free_listp = bp;             // 가용 리스트의 새로운 HEAD를 bp로 설정하기
+        // 병합된 새 블록을 가용 리스트에 추가
+        add_to_freelist(bp);
 
     } else if (prev_alloc == FREE && next_alloc == ALLOCATED) {     /* Case 3 */
-        // 현재 블록(bp)과 'bp의 이전 블록'을 병합하는 경우
-        void *victim_block = PREV_BLKP(bp);
+        void *prev_bp = PREV_BLKP(bp);
+        remove_from_freelist(prev_bp);
 
-        // 가용 리스트에 있는 victim의 이전 블록(pred)과 다음 블록(succ)
-        void *victim_pred = (void *)GET(victim_block);
-        void *victim_succ = (void *)GET(victim_block + WSIZE);
-
-        // victim이 가용 리스트의 맨 앞 블록인 경우
-        if (victim_pred == NULL && victim_succ != NULL) {
-            free_listp = victim_succ;
-            PUT(victim_succ, 0);              // victim 다음 블럭의 PRED를 NULL로 설정한다.
-        }
-        // victim이 가용 리스트의 맨 뒤 블록인 경우
-        else if (victim_pred != NULL && victim_succ == NULL) {
-            PUT(victim_pred + WSIZE, 0);      // victim 이전 블럭의 SUCC을 NULL로 설정한다.
-
-        }
-        // victim이 가용 리스트의 유일한 블록인 경우
-        else if (victim_pred == NULL && victim_succ == NULL) {
-            // 병합하기 전 victim이 가리키던 PRED, SUCC을 초기화한다.
-            PUT(victim_block, 0);           // victim의 PRED 를 NULL로 설정
-            PUT(victim_block + WSIZE, 0);   // victim의 SUCC 을 NULL로 설정
-            free_listp = 0;                 // 가용 리스트의 시작 주소를 초기화한다.
-        } else {
-            // victim의 이전 블록의 PRED는 그대로 두고, SUCC을 victim_next로 가리키게 한다.
-            // victim의 다음 블록의 NEXT는 그대로 두고, PRED를 victim_prev로 가리키게 한다.
-            PUT(victim_pred + WSIZE, victim_succ);
-            PUT(victim_succ, victim_pred);
-        }
-
-
-        size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+        // 물리적으로 병합
+        size += GET_SIZE(HDRP(prev_bp));
         PUT(FTRP(bp), PACK(size, FREE));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, FREE));
+        PUT(HDRP(prev_bp), PACK(size, FREE));
+        bp = prev_bp;
 
-        // 병합한 블록을 가용 리스트의 맨 앞에 추가한다.
-        PUT(PREV_BLKP(bp), 0);
-        PUT(PREV_BLKP(bp) + WSIZE, free_listp);
-
-        // 기존 가용 블록의 첫 번째 블록은 free_listp가 가리키고 있다.
-        // edge case: 만약 가용 리스트가 비어 있는 상태였다면?
-        if (free_listp != NULL) {
-            PUT(free_listp, PREV_BLKP(bp));     // Old Head의 PRED는 새 가용 블록을 가리키게 한다.
-        }
-
-        // free_listp 업데이트: bp는 PREV_BLKP(bp)에 병합되는 형태이다.
-        free_listp = PREV_BLKP(bp);
+        // 병합된 새 블록을 가용 리스트에 추가
+        add_to_freelist(bp);
 
     } else {                                                        /* Case 4 */
-        size += GET_SIZE(HDRP(PREV_BLKP(bp))) + GET_SIZE(HDRP(NEXT_BLKP(bp)));
-        PUT(HDRP(PREV_BLKP(bp)), PACK(size, FREE));
-        PUT(FTRP(NEXT_BLKP(bp)), PACK(size, FREE));
-        bp = PREV_BLKP(bp);
+        void *prev_bp = PREV_BLKP(bp);
+        void *next_bp = NEXT_BLKP(bp);
+        remove_from_freelist(prev_bp);  // 이전 블록 제거
+        remove_from_freelist(next_bp);  // 다음 블록 제거
+
+        // 물리적으로 병합
+        size += GET_SIZE(HDRP(prev_bp)) + GET_SIZE(HDRP(next_bp));
+        PUT(HDRP(prev_bp), PACK(size, FREE));
+        PUT(FTRP(next_bp), PACK(size, FREE));
+        bp = prev_bp;
+
+        // 병합된 새 블록을 가용 리스트에 추가
+        add_to_freelist(bp);
     }
     return bp;
 }
