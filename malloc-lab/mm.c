@@ -48,7 +48,7 @@ team_t team = {
 #define CHUNKSIZE   (1 << 12)   // mem_sbrk로 힙을 늘릴 용 (4096 = 한 번에 4KB씩)
 
 #define PROLOGUE_BLOCK_SIZE DSIZE      // 프롤로그 블록 크기 (8바이트)
-#define MINIMUM_BLOCK_SIZE (2 * DSIZE) // 최소 블록 크기 (16바이트)
+#define MINIMUM_BLOCK_SIZE (3 * DSIZE) // 최소 블록 크기 (32바이트)
 
 #define ALLOCATED 1 // 할당된 상태
 #define FREE      0 // 가용 상태
@@ -74,7 +74,7 @@ team_t team = {
 /* Given block ptr bp, compute address of next and previous blocks */
 // 현재 블록의 다음 블록 포인터 계산 :
 #define NEXT_BLKP(bp)   ((char *)(bp) + GET_SIZE(((char *)(bp) - WSIZE)))
-// 현재 블록의 이전 블록 포인터 계산
+// 현ㄴ재 블록의 이전 블록 포인터 계산
 #define PREV_BLKP(bp)   ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
 /* Global variables */
@@ -82,6 +82,19 @@ static char *heap_listp;
 
 // 가용 리스트의 시작점을 가리키는 포인터
 static char *free_listp;
+
+// bp(가용 블록 포인터)가 가리키는 곳에 PRED 포인터 주소값을 저장
+#define SET_PRED(bp, ptr) (*(char **)(bp) = (char *)(ptr))
+
+// bp(가용 블록 포인터)가 가리키는 곳에서 DSIZE 떨어진 곳에 SUCC 포인터 주소값을 저장
+#define SET_SUCC(bp, ptr) (*(char **)(bp + DSIZE) = (char *)(ptr))
+
+// bp가 가리키는 곳의 PRED 포인터 주소값을 읽어옴
+#define GET_PRED(bp) (*(char **)(bp))
+
+// bp가 가리키는 곳에서 WSIZE 떨어진 곳의 SUCC 포인터 주소값을 읽어옴
+#define GET_SUCC(bp) (*(char **)(bp + DSIZE))
+
 
 /* 가용 리스트 관리를 위한 헬퍼 함수 */
 
@@ -91,16 +104,16 @@ static char *free_listp;
  */
 static void add_to_freelist(void *bp) {
     // 새 블록의 SUCC는 기존의 첫 번째 블록(free_listp)을 가리켜야 한다.
-    PUT(bp + WSIZE, free_listp);
+    SET_SUCC(bp, free_listp);
 
     // 기존 가용 리스트가 비어있지 않았다면,
     // 기존 첫 번째 블록의 PRED 가 새 블록을 가리켜야 한다.
     if (free_listp != NULL) {
-        PUT(free_listp, (unsigned int) bp);
+        SET_PRED(free_listp, bp);
     }
 
-    PUT(bp, 0);         // 새 블록의 PRED는 NULL
-    free_listp = bp;    // 가용 리스트의 시작 블록은 이제 새 블록
+    SET_PRED(bp, NULL);   // 새 블록의 PRED는 NULL
+    free_listp = bp;      // 가용 리스트의 시작 블록은 이제 새 블록
 }
 
 /**
@@ -109,23 +122,20 @@ static void add_to_freelist(void *bp) {
  */
 static void remove_from_freelist(void *bp) {
     // 제거하려는 블록의 이전/다음 블록 확인하기
-    void *prev_free = (void *)GET(bp);
-    void *next_free = (void *)GET(bp + WSIZE);
+    void *prev_free = GET_PRED(bp);
+    void *next_free = GET_SUCC(bp);
 
     if (prev_free) {
-        PUT(prev_free + WSIZE, (unsigned int) next_free);
+        SET_SUCC(prev_free, next_free);
     } else {                        // 제거하려는 블록이 리스트의 첫 번째 블록인 경우
         free_listp = next_free;     // 리스트의 시작은 삭제할 블록의 다음 블록
     }
 
     // 다음 블록의 PRED를 제거하려는 블록의 이전 블록으로 설정
     if (next_free) {
-        PUT(next_free, (unsigned int) prev_free);
+        SET_PRED(next_free, prev_free);
     }
 }
-
-
-
 
 /*
  * coalesce
@@ -195,7 +205,6 @@ static void *coalesce(void *bp) {
     return bp;
 }
 
-
 /*
  * extend_heap - 힙을 확장하여 새로운 가용 블록을 생성하는 함수
  *
@@ -234,8 +243,6 @@ static void *extend_heap(size_t words) {
     return coalesce(bp);
 }
 
-
-
 /*
  * mm_init - 메모리 시스템을 초기화한다.
  *           초기 힙 영역을 생성하고 프롤로그와 에필로그 블록을 설정한다.
@@ -244,7 +251,7 @@ static void *extend_heap(size_t words) {
  */
 int mm_init(void) {
     // 가용 리스트의 시작점 초기화
-    free_listp = 0;
+    free_listp = NULL;
 
     // 초기 힙 공간 4워드(16바이트)를 OS로부터 할당받는다.
     if ((heap_listp = mem_sbrk(4 * WSIZE)) == (void *) -1) {
@@ -254,7 +261,8 @@ int mm_init(void) {
     PUT(heap_listp, 0);                                                   /* 정렬을 위한 패딩 워드 */
     PUT(heap_listp + (1 * WSIZE), PACK(PROLOGUE_BLOCK_SIZE, ALLOCATED));  /* 프롤로그 블록의 헤더 */
     PUT(heap_listp + (2 * WSIZE), PACK(PROLOGUE_BLOCK_SIZE, ALLOCATED));  /* 프롤로그 블록의 푸터 */
-    PUT(HDRP(NEXT_BLKP(heap_listp)), PACK(0, ALLOCATED));                 /* 에필로그 블록의 헤더 */
+    PUT(heap_listp + (3 * WSIZE), PACK(0, ALLOCATED));                    /* 에필로그 블록의 헤더 */
+
     heap_listp += (2 * WSIZE);                                            /* 프롤로그 블록의 payload를 가리키도록 포인터 이동 */
 
     // CHUNKSIZE만큼 힙을 확장하여 초기 가용 블록을 생성한다.
@@ -264,8 +272,6 @@ int mm_init(void) {
 
     return 0;
 }
-
-
 
 /*
  * find_fit - 요청된 크기를 수용할 수 있는 가용 블록을 찾는 함수
@@ -281,14 +287,13 @@ int mm_init(void) {
 static void *find_fit(size_t required_size) {
     void *bp;
 
-    for (bp = free_listp; bp != NULL; bp = (void *)GET(bp + WSIZE)) {
-        if (!GET_ALLOC(HDRP(bp)) && (required_size <= GET_SIZE(HDRP(bp)))) {
+    for (bp = free_listp; bp != NULL; bp = GET_SUCC(bp)) {
+        if (required_size <= GET_SIZE(HDRP(bp))) {
             return bp;
         }
     }
     return NULL;
 }
-
 
 /*
  * place - 가용 블록에 요청된 크기의 메모리를 할당하는 함수
@@ -306,29 +311,7 @@ static void place(void *bp, size_t required_size) {
     size_t free_size = GET_SIZE(HDRP(bp));
     size_t remainder_size = free_size - required_size;
 
-    void *prev_free_bp = (void *)GET(bp);           // 이전 가용 블록의 주소 읽기
-    void *next_free_bp = (void *)GET(bp + WSIZE);   // 다음 가용 블록의 주소 읽기
-
-    // edge case 1: 제거된 블록이 가용 리스트의 첫 번째 블록이었다면?
-    if (prev_free_bp == NULL && next_free_bp != NULL) {
-        free_listp = next_free_bp;
-
-        // 두 번째 블록의 PRED 를 NULL로 해야 한다.
-        PUT(next_free_bp, 0);
-    }
-    // edge case 2: 제거된 블록이 가용 리스트의 가장 마지막 블록이었다면?
-    else if (prev_free_bp != NULL && next_free_bp == NULL) {
-        // 삭제 블록의 '이전 블록'의(=끝에서 두 번째 블록) SUCC을 NULL로 해야 한다.
-        PUT(prev_free_bp + WSIZE, 0);
-    }
-    // edge case 3: 제거된 블록이 가용 리스트의 유일한 블록이었다면?
-    else if (prev_free_bp == NULL && next_free_bp == NULL) {
-        free_listp = 0;   // 가용 리스트의 시작 주소를 초기화한다.
-    }
-    else {
-        PUT(prev_free_bp + WSIZE, next_free_bp);  // 앞 블록의 SUCC가 '뒷 블록'을 가리키도록 수정
-        PUT(next_free_bp, prev_free_bp);          // 뒷 블록의 PRED가 '앞 블록'을 가리키도록 수정
-    }
+    remove_from_freelist(bp);
 
     if (remainder_size >= MINIMUM_BLOCK_SIZE) {  // 남는 공간이 분할할 만큼 크다면 분할
         // 먼저 요청한만큼 메모리 할당하기
@@ -340,24 +323,11 @@ static void place(void *bp, size_t required_size) {
         PUT(HDRP(bp), PACK(remainder_size, FREE));    // 남는 공간의 헤더 설정
         PUT(FTRP(bp), PACK(remainder_size, FREE));    // 남는 공간의 푸터 설정
         coalesce(bp);                                 // 새로 생긴 가용 블록을 인접 블록과 병합
-
-        // 새로운 가용 블록이 가용 리스트의 가장 첫 번째 블록이 되어야 한다.
-        PUT(bp, 0);                   // 새 가용 블록의 PRED -> NULL이다. (가용 리스트의 첫 번째 블록이니까.)
-        PUT(bp + WSIZE, free_listp);  // 새 가용 블록의 SUCC -> 기존 가용 리스트의 첫 번째 블록을 가리키던 free_listp이다.
-
-        // 기존 가용 블록의 첫 번째 블록은 free_listp가 가리키고 있다.
-        // edge case: 만약 가용 리스트가 비어 있는 상태였다면?
-        if (free_listp != NULL) {
-            PUT(free_listp, bp);     // Old Head의 PRED는 새 가용 블록을 가리키게 한다.
-        }
-        free_listp = bp;             // 가용 리스트의 새로운 HEAD를 bp로 설정하기
-
     } else {
         PUT(HDRP(bp), PACK(free_size, ALLOCATED));    // 헤더에 원래 크기, 할당됨 상태 기록
         PUT(FTRP(bp), PACK(free_size, ALLOCATED));    // 푸터에도 동일하게 기록
     }
 }
-
 
 /*
  * mm_malloc - 요청된 크기의 메모리를 할당하는 함수
@@ -403,7 +373,6 @@ void *mm_malloc(size_t size) {
     return bp;
 }
 
-
 /*
  * mm_free - 할당된 메모리 블록을 해제하는 함수
  *
@@ -422,7 +391,6 @@ void mm_free(void *bp)
     PUT(FTRP(bp), PACK(size, FREE));
     coalesce(bp);
 }
-
 
 /*
  * mm_realloc - 메모리 블록의 크기를 재조정하는 함수
@@ -477,14 +445,34 @@ void *mm_realloc(void *ptr, size_t size)
 
         // 다음 블록이 가용 상태이고, 합친 크기가 충분한 경우
         if (next_alloc == FREE && total_size >= required_size) {
-            PUT(HDRP(ptr), PACK(total_size, ALLOCATED));
-            PUT(FTRP(ptr), PACK(total_size, ALLOCATED));
+            remove_from_freelist(next_bp);
+
+            // 병합 후 남는 공간이 분할할 만큼 큰지 확인
+            if ((total_size - required_size) >= MINIMUM_BLOCK_SIZE) {
+                // 필요한 만큼만 할당
+                PUT(HDRP(ptr), PACK(required_size, ALLOCATED));
+                PUT(FTRP(ptr), PACK(required_size, ALLOCATED));
+                // 남는 공간을 새로운 가용 블록으로 분할
+                void *remainder_bp = NEXT_BLKP(ptr);
+                PUT(HDRP(remainder_bp), PACK(total_size - required_size, FREE));
+                PUT(FTRP(remainder_bp), PACK(total_size - required_size, FREE));
+                coalesce(remainder_bp);
+            } else { // 분할할 수 없으면 전체를 사용
+                PUT(HDRP(ptr), PACK(total_size, ALLOCATED));
+                PUT(FTRP(ptr), PACK(total_size, ALLOCATED));
+            }
             return ptr;
         }
         // [최후의 수단] 새로 할당받고 데이터 복사
         void *newptr = mm_malloc(size);
+        size_t copy_size;
         if (newptr == NULL) return NULL;
-        memcpy(newptr, ptr, old_size - DSIZE); // 기존 payload 만큼만 복사
+
+        copy_size = old_size - DSIZE; // 기존 페이로드 크기
+        if (size < copy_size) {       // 요청된 크기가 더 작으면
+            copy_size = size;         // 작은 크기만큼만 복사
+        }
+        memcpy(newptr, ptr, copy_size);
         mm_free(ptr);
         return newptr;
     }
